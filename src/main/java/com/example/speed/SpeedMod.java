@@ -1,4 +1,3 @@
-java
 package com.example.speed;
 
 import net.fabricmc.api.ModInitializer;

@@ -30,19 +30,23 @@ public class SpeedMod implements ModInitializer {
     private static int fakeLagCounter = 0;
     private static boolean desyncMode = false;
     private static long lastHackDetectorPing = 0;
-    private static long lastDesyncUpdate = 0; // добавлено
+    private static long lastDesyncUpdate = 0;
+    
+    // Смена цели: тело/голова
+    private static boolean aimHead = false; // false = тело, true = голова
+    private static long lastAimSwitchTime = 0;
+    private static final long AIM_SWITCH_INTERVAL = 5000; // 5 секунд
 
     // ========== НАСТРОЙКИ ==========
     private static final float RANGE = 4.2f;
-    private static final long MIN_DELAY = 720L;
-    private static final long MAX_DELAY = 830L;
+    private static final long MIN_DELAY = 650L;      // 0.650 сек
+    private static final long MAX_DELAY = 700L;      // 0.700 сек
     private static final float YAW_SPEED_BASE = 25.0f;
     private static final float YAW_SPEED_VARIATION = 12.0f;
     private static final float PITCH_SPEED_FACTOR_MIN = 0.4f;
     private static final float PITCH_SPEED_FACTOR_MAX = 0.9f;
-    private static final int SHAKE_PIXELS = 2;
+    private static final int SHAKE_PIXELS = 3;       // тряска 3 пикселя
     private static final long SHAKE_INTERVAL_MS = 50;
-    private static final int MISS_CHANCE_PERCENT = 18;
 
     @Override
     public void onInitialize() {
@@ -67,7 +71,10 @@ public class SpeedMod implements ModInitializer {
     private void tick() {
         performScreenShake();
         
-        // === HT-1: FAKE LAG ===
+        // Смена цели между телом и головой каждые 5 секунд
+        updateAimTarget();
+        
+        // FAKE LAG
         if (fakeLagCounter > 0) {
             fakeLagCounter--;
             try { Thread.sleep(random.nextInt(1, 3)); } catch (InterruptedException e) {}
@@ -78,10 +85,10 @@ public class SpeedMod implements ModInitializer {
             return;
         }
         
-        // === HT-1: ROTATION NOISE ===
+        // ROTATION NOISE
         applyRotationNoise();
         
-        // === HT-1: DESYNC ROTATION ===
+        // DESYNC ROTATION
         applyRotationDesync();
         
         if (random.nextInt(100) < 3) {
@@ -98,11 +105,21 @@ public class SpeedMod implements ModInitializer {
         if (!canSee && random.nextFloat() < 0.15f) canSee = true;
 
         Vec3d eye = mc.player.getEyePos();
-        Vec3d targetCenter = target.getBoundingBox().getCenter();
+        Vec3d targetPoint;
+        
+        // ВЫБОР ЦЕЛИ: тело (центр хитбокса) или голова (+0.8 по Y)
+        if (aimHead) {
+            // Аим на голову (верхняя часть хитбокса)
+            targetPoint = target.getBoundingBox().getCenter().add(0, 0.4, 0);
+        } else {
+            // Аим на тело (центр)
+            targetPoint = target.getBoundingBox().getCenter();
+        }
+        
         float aimOffsetX = (random.nextFloat() - 0.5f) * 0.06f;
         float aimOffsetY = (random.nextFloat() - 0.5f) * 0.04f;
         float aimOffsetZ = (random.nextFloat() - 0.5f) * 0.04f;
-        Vec3d to = targetCenter.add(aimOffsetX, aimOffsetY, aimOffsetZ).subtract(eye);
+        Vec3d to = targetPoint.add(aimOffsetX, aimOffsetY, aimOffsetZ).subtract(eye);
         
         double hyp = Math.hypot(to.x, to.z);
         float idealYaw = (float) (Math.toDegrees(Math.atan2(to.z, to.x)) - 90);
@@ -110,7 +127,7 @@ public class SpeedMod implements ModInitializer {
         idealYaw = wrap(idealYaw);
         idealPitch = clamp(idealPitch, -89, 89);
 
-        // === HT-1: HUMANIZED MICRO-JITTER ===
+        // HUMANIZED MICRO-JITTER
         float jitterYaw = (random.nextFloat() - 0.5f) * 0.18f;
         float jitterPitch = (random.nextFloat() - 0.5f) * 0.12f;
         idealYaw += jitterYaw;
@@ -148,13 +165,7 @@ public class SpeedMod implements ModInitializer {
         float angleTolerance = 8.0f + random.nextFloat() * 7.0f;
         boolean canAttack = Math.abs(deltaYawCheck) < angleTolerance && Math.abs(deltaPitchCheck) < angleTolerance;
         
-        boolean missChance = random.nextInt(100) < MISS_CHANCE_PERCENT;
-        
-        // === HT-1: рандомизация точности ===
-        boolean accuracyDebuff = random.nextInt(100) < 6;
-        if (accuracyDebuff && canAttack) canAttack = random.nextBoolean();
-        
-        if (now - lastAttackTime >= fatigueDelay && canAttack && !missChance) {
+        if (now - lastAttackTime >= fatigueDelay && canAttack) {
             boolean wasSprinting = mc.player.isSprinting();
             
             if (random.nextInt(100) < 18) {
@@ -183,16 +194,29 @@ public class SpeedMod implements ModInitializer {
             }
         }
         
-        // === HT-1: анти-паттерн ===
+        // АНТИ-ПАТТЕРН
         if (random.nextInt(380) < 2) {
             try { Thread.sleep(random.nextInt(20, 70)); } catch (InterruptedException e) {}
         }
         
-        // === HT-1: обход (эмуляция честного игрока) ===
+        // Эмуляция честного игрока
         if (now - lastHackDetectorPing > 5000) {
             lastHackDetectorPing = now;
             if (mc.player != null) {
                 mc.player.sendMessage(Text.literal("/ping"), true);
+            }
+        }
+    }
+    
+    private void updateAimTarget() {
+        long now = System.currentTimeMillis();
+        if (now - lastAimSwitchTime >= AIM_SWITCH_INTERVAL) {
+            aimHead = !aimHead; // переключаем между телом и головой
+            lastAimSwitchTime = now;
+            
+            // Отладочное сообщение в чат (можно убрать, но оставил для наглядности)
+            if (mc.player != null) {
+                mc.player.sendMessage(Text.literal("§7[Killaura] Aiming: " + (aimHead ? "§6HEAD" : "§3BODY")), true);
             }
         }
     }

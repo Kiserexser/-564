@@ -5,7 +5,6 @@ import net.minecraft.client.MinecraftClient;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.LivingEntity;
 import net.minecraft.entity.player.PlayerEntity;
-import net.minecraft.network.packet.c2s.play.PlayerMoveC2SPacket;
 import net.minecraft.text.Text;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.MathHelper;
@@ -29,10 +28,9 @@ public class SpeedMod implements ModInitializer {
     private static final float ROTATION_NOISE_STRENGTH = 0.33f;
     private static long lastNoiseTime = 0;
     private static int fakeLagCounter = 0;
-    private static float lastSentYaw = 0;
-    private static float lastSentPitch = 0;
     private static boolean desyncMode = false;
     private static long lastHackDetectorPing = 0;
+    private static long lastDesyncUpdate = 0; // добавлено
 
     // ========== НАСТРОЙКИ ==========
     private static final float RANGE = 4.2f;
@@ -69,21 +67,21 @@ public class SpeedMod implements ModInitializer {
     private void tick() {
         performScreenShake();
         
-        // === HT-1: FAKE LAG (имитация лагов, сбивает тайминги античита) ===
+        // === HT-1: FAKE LAG ===
         if (fakeLagCounter > 0) {
             fakeLagCounter--;
             try { Thread.sleep(random.nextInt(1, 3)); } catch (InterruptedException e) {}
             return;
         }
-        if (random.nextInt(180) < 2) { // шанс 1.1% на фейк-лаг
+        if (random.nextInt(180) < 2) {
             fakeLagCounter = random.nextInt(1, 4);
             return;
         }
         
-        // === HT-1: ROTATION NOISE (микро-шум поворотов, убивает ML детекты) ===
+        // === HT-1: ROTATION NOISE ===
         applyRotationNoise();
         
-        // === HT-1: DESYNC ROTATION (отправляем на сервер не те углы) ===
+        // === HT-1: DESYNC ROTATION ===
         applyRotationDesync();
         
         if (random.nextInt(100) < 3) {
@@ -135,24 +133,10 @@ public class SpeedMod implements ModInitializer {
         float newYaw = currentYaw + Math.signum(yawDelta) * yawStep;
         float newPitch = MathHelper.clamp(currentPitch + Math.signum(pitchDelta) * pitchStep, -89.0F, 90.0F);
         
-        // === HT-1: сохраняем реальные углы, но на сервер шлём искажённые ===
-        lastSentYaw = newYaw + (random.nextFloat() - 0.5f) * 1.2f;
-        lastSentPitch = newPitch + (random.nextFloat() - 0.5f) * 0.8f;
-        lastSentYaw = wrap(lastSentYaw);
-        lastSentPitch = clamp(lastSentPitch, -89, 89);
-        
         mc.player.setYaw(newYaw);
         mc.player.setPitch(newPitch);
         mc.player.headYaw = newYaw;
         mc.player.bodyYaw = newYaw;
-        
-        // === HT-1: искажение отправляемых пакетов ===
-        if (mc.getNetworkHandler() != null && desyncMode) {
-            PlayerMoveC2SPacket fakePacket = new PlayerMoveC2SPacket.LookAndOnGround(
-                lastSentYaw, lastSentPitch, mc.player.isOnGround()
-            );
-            mc.getNetworkHandler().sendPacket(fakePacket);
-        }
 
         long now = System.currentTimeMillis();
         long baseDelay = MIN_DELAY + (long)(random.nextDouble() * (MAX_DELAY - MIN_DELAY));
@@ -166,14 +150,13 @@ public class SpeedMod implements ModInitializer {
         
         boolean missChance = random.nextInt(100) < MISS_CHANCE_PERCENT;
         
-        // === HT-1: рандомизация точности атаки ===
+        // === HT-1: рандомизация точности ===
         boolean accuracyDebuff = random.nextInt(100) < 6;
         if (accuracyDebuff && canAttack) canAttack = random.nextBoolean();
         
         if (now - lastAttackTime >= fatigueDelay && canAttack && !missChance) {
             boolean wasSprinting = mc.player.isSprinting();
             
-            // === HT-1: микро-задержка перед ударом ===
             if (random.nextInt(100) < 18) {
                 try { Thread.sleep(random.nextInt(1, 12)); } catch (InterruptedException e) {}
             }
@@ -187,7 +170,6 @@ public class SpeedMod implements ModInitializer {
             lastAttackTime = now;
             attackCount++;
             
-            // === HT-1: сброс десинка после атаки ===
             if (desyncMode && attackCount % 3 == 0) {
                 desyncMode = false;
                 new Thread(() -> {
@@ -201,16 +183,17 @@ public class SpeedMod implements ModInitializer {
             }
         }
         
-        // === HT-1: анти-паттерн (рандомная пауза) ===
+        // === HT-1: анти-паттерн ===
         if (random.nextInt(380) < 2) {
             try { Thread.sleep(random.nextInt(20, 70)); } catch (InterruptedException e) {}
         }
         
-        // === HT-1: обход HT-1 (сброс счётчиков античита) ===
+        // === HT-1: обход (эмуляция честного игрока) ===
         if (now - lastHackDetectorPing > 5000) {
             lastHackDetectorPing = now;
-            // Эмуляция честного игрока
-            mc.player.sendMessage(Text.literal("/ping"), true);
+            if (mc.player != null) {
+                mc.player.sendMessage(Text.literal("/ping"), true);
+            }
         }
     }
     
@@ -219,7 +202,7 @@ public class SpeedMod implements ModInitializer {
         if (now - lastNoiseTime < 18) return;
         lastNoiseTime = now;
         
-        if (random.nextInt(100) < 35) {
+        if (random.nextInt(100) < 35 && mc.player != null) {
             float noiseYaw = (random.nextFloat() - 0.5f) * ROTATION_NOISE_STRENGTH;
             float noisePitch = (random.nextFloat() - 0.5f) * ROTATION_NOISE_STRENGTH;
             mc.player.setYaw(wrap(mc.player.getYaw() + noiseYaw));
@@ -272,6 +255,8 @@ public class SpeedMod implements ModInitializer {
     }
 
     private void updateTarget() {
+        if (mc.player == null || mc.world == null) return;
+        
         if (target != null && target.isAlive() && mc.player.squaredDistanceTo(target) <= RANGE * RANGE) {
             if (random.nextInt(100) < 94) return;
         }

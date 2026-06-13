@@ -5,6 +5,7 @@ import net.minecraft.client.MinecraftClient;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.LivingEntity;
 import net.minecraft.entity.player.PlayerEntity;
+import net.minecraft.network.packet.c2s.play.PlayerMoveC2SPacket;
 import net.minecraft.text.Text;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.MathHelper;
@@ -22,20 +23,28 @@ public class SpeedMod implements ModInitializer {
     private static long lastAttackTime = 0;
     private static long lastScreenShakeTime = 0;
     private static final Random random = new Random();
-    private static final TSAngle rotator = new TSAngle();
     private static int attackCount = 0;
+    
+    // HT-1 обходы
+    private static final float ROTATION_NOISE_STRENGTH = 0.33f;
+    private static long lastNoiseTime = 0;
+    private static int fakeLagCounter = 0;
+    private static float lastSentYaw = 0;
+    private static float lastSentPitch = 0;
+    private static boolean desyncMode = false;
+    private static long lastHackDetectorPing = 0;
 
-    // ========== НАСТРОЙКИ ПОД МЕЧ ==========
+    // ========== НАСТРОЙКИ ==========
     private static final float RANGE = 4.2f;
-    private static final long MIN_DELAY = 720L;           // 0.720 сек
-    private static final long MAX_DELAY = 830L;           // 0.830 сек
+    private static final long MIN_DELAY = 720L;
+    private static final long MAX_DELAY = 830L;
     private static final float YAW_SPEED_BASE = 25.0f;
     private static final float YAW_SPEED_VARIATION = 12.0f;
     private static final float PITCH_SPEED_FACTOR_MIN = 0.4f;
     private static final float PITCH_SPEED_FACTOR_MAX = 0.9f;
     private static final int SHAKE_PIXELS = 2;
     private static final long SHAKE_INTERVAL_MS = 50;
-    private static final int MISS_CHANCE_PERCENT = 18;    // Шанс промаха 18%
+    private static final int MISS_CHANCE_PERCENT = 18;
 
     @Override
     public void onInitialize() {
@@ -47,7 +56,7 @@ public class SpeedMod implements ModInitializer {
                 boolean currentR = GLFW.glfwGetKey(window, GLFW.GLFW_KEY_R) == GLFW.GLFW_PRESS;
                 if (currentR && !lastR) {
                     killaura = !killaura;
-                    mc.player.sendMessage(Text.literal(killaura ? "§aKillaura (SWORD) ON" : "§cKillaura OFF"), true);
+                    mc.player.sendMessage(Text.literal(killaura ? "§aKillaura (HT-1 EVASION) ON" : "§cKillaura OFF"), true);
                     if (!killaura) target = null;
                     try { Thread.sleep(200); } catch (InterruptedException ignored) {}
                 }
@@ -59,6 +68,23 @@ public class SpeedMod implements ModInitializer {
 
     private void tick() {
         performScreenShake();
+        
+        // === HT-1: FAKE LAG (имитация лагов, сбивает тайминги античита) ===
+        if (fakeLagCounter > 0) {
+            fakeLagCounter--;
+            try { Thread.sleep(random.nextInt(1, 3)); } catch (InterruptedException e) {}
+            return;
+        }
+        if (random.nextInt(180) < 2) { // шанс 1.1% на фейк-лаг
+            fakeLagCounter = random.nextInt(1, 4);
+            return;
+        }
+        
+        // === HT-1: ROTATION NOISE (микро-шум поворотов, убивает ML детекты) ===
+        applyRotationNoise();
+        
+        // === HT-1: DESYNC ROTATION (отправляем на сервер не те углы) ===
+        applyRotationDesync();
         
         if (random.nextInt(100) < 3) {
             try { Thread.sleep(random.nextInt(15, 45)); } catch (InterruptedException e) {}
@@ -86,37 +112,70 @@ public class SpeedMod implements ModInitializer {
         idealYaw = wrap(idealYaw);
         idealPitch = clamp(idealPitch, -89, 89);
 
-        Turns current = new Turns(mc.player.getYaw(), mc.player.getPitch());
-        Turns targetAngles = new Turns(idealYaw, idealPitch);
-        
+        // === HT-1: HUMANIZED MICRO-JITTER ===
+        float jitterYaw = (random.nextFloat() - 0.5f) * 0.18f;
+        float jitterPitch = (random.nextFloat() - 0.5f) * 0.12f;
+        idealYaw += jitterYaw;
+        idealPitch += jitterPitch;
+        idealYaw = wrap(idealYaw);
+        idealPitch = clamp(idealPitch, -89, 89);
+
         float dynamicYawSpeed = YAW_SPEED_BASE + random.nextFloat() * YAW_SPEED_VARIATION;
         float dynamicPitchSpeed = dynamicYawSpeed * (PITCH_SPEED_FACTOR_MIN + random.nextFloat() * (PITCH_SPEED_FACTOR_MAX - PITCH_SPEED_FACTOR_MIN));
         
-        Turns newAngles = rotator.limitAngleChange(current, targetAngles, dynamicYawSpeed, dynamicPitchSpeed);
-        mc.player.setYaw(newAngles.getYaw());
-        mc.player.setPitch(newAngles.getPitch());
-        mc.player.headYaw = newAngles.getYaw();
-        mc.player.bodyYaw = newAngles.getYaw();
+        float currentYaw = mc.player.getYaw();
+        float currentPitch = mc.player.getPitch();
+        
+        float yawDelta = wrap(idealYaw - currentYaw);
+        float pitchDelta = idealPitch - currentPitch;
+        
+        float yawStep = Math.min(Math.abs(yawDelta), dynamicYawSpeed);
+        float pitchStep = Math.min(Math.abs(pitchDelta), dynamicPitchSpeed);
+        
+        float newYaw = currentYaw + Math.signum(yawDelta) * yawStep;
+        float newPitch = MathHelper.clamp(currentPitch + Math.signum(pitchDelta) * pitchStep, -89.0F, 90.0F);
+        
+        // === HT-1: сохраняем реальные углы, но на сервер шлём искажённые ===
+        lastSentYaw = newYaw + (random.nextFloat() - 0.5f) * 1.2f;
+        lastSentPitch = newPitch + (random.nextFloat() - 0.5f) * 0.8f;
+        lastSentYaw = wrap(lastSentYaw);
+        lastSentPitch = clamp(lastSentPitch, -89, 89);
+        
+        mc.player.setYaw(newYaw);
+        mc.player.setPitch(newPitch);
+        mc.player.headYaw = newYaw;
+        mc.player.bodyYaw = newYaw;
+        
+        // === HT-1: искажение отправляемых пакетов ===
+        if (mc.getNetworkHandler() != null && desyncMode) {
+            PlayerMoveC2SPacket fakePacket = new PlayerMoveC2SPacket.LookAndOnGround(
+                lastSentYaw, lastSentPitch, mc.player.isOnGround()
+            );
+            mc.getNetworkHandler().sendPacket(fakePacket);
+        }
 
         long now = System.currentTimeMillis();
         long baseDelay = MIN_DELAY + (long)(random.nextDouble() * (MAX_DELAY - MIN_DELAY));
-        
         long fatigueDelay = (long)(baseDelay + (attackCount / 12) * 2);
         fatigueDelay = Math.min(fatigueDelay, MAX_DELAY + 30);
         
-        float deltaYaw = wrap(idealYaw - mc.player.getYaw());
-        float deltaPitch = idealPitch - mc.player.getPitch();
+        float deltaYawCheck = wrap(idealYaw - mc.player.getYaw());
+        float deltaPitchCheck = idealPitch - mc.player.getPitch();
         float angleTolerance = 8.0f + random.nextFloat() * 7.0f;
-        boolean canAttack = Math.abs(deltaYaw) < angleTolerance && Math.abs(deltaPitch) < angleTolerance;
+        boolean canAttack = Math.abs(deltaYawCheck) < angleTolerance && Math.abs(deltaPitchCheck) < angleTolerance;
         
-        // Шанс промаха 18%
         boolean missChance = random.nextInt(100) < MISS_CHANCE_PERCENT;
+        
+        // === HT-1: рандомизация точности атаки ===
+        boolean accuracyDebuff = random.nextInt(100) < 6;
+        if (accuracyDebuff && canAttack) canAttack = random.nextBoolean();
         
         if (now - lastAttackTime >= fatigueDelay && canAttack && !missChance) {
             boolean wasSprinting = mc.player.isSprinting();
             
-            if (random.nextInt(100) < 15) {
-                try { Thread.sleep(random.nextInt(1, 8)); } catch (InterruptedException e) {}
+            // === HT-1: микро-задержка перед ударом ===
+            if (random.nextInt(100) < 18) {
+                try { Thread.sleep(random.nextInt(1, 12)); } catch (InterruptedException e) {}
             }
             
             mc.interactionManager.attackEntity(mc.player, target);
@@ -128,13 +187,53 @@ public class SpeedMod implements ModInitializer {
             lastAttackTime = now;
             attackCount++;
             
+            // === HT-1: сброс десинка после атаки ===
+            if (desyncMode && attackCount % 3 == 0) {
+                desyncMode = false;
+                new Thread(() -> {
+                    try { Thread.sleep(random.nextInt(50, 150)); } catch (InterruptedException e) {}
+                    desyncMode = true;
+                }).start();
+            }
+            
             if (attackCount % 7 == 0 && random.nextBoolean()) {
                 forceRescanTarget();
             }
         }
         
-        if (random.nextInt(300) < 2) {
-            try { Thread.sleep(random.nextInt(20, 60)); } catch (InterruptedException e) {}
+        // === HT-1: анти-паттерн (рандомная пауза) ===
+        if (random.nextInt(380) < 2) {
+            try { Thread.sleep(random.nextInt(20, 70)); } catch (InterruptedException e) {}
+        }
+        
+        // === HT-1: обход HT-1 (сброс счётчиков античита) ===
+        if (now - lastHackDetectorPing > 5000) {
+            lastHackDetectorPing = now;
+            // Эмуляция честного игрока
+            mc.player.sendMessage(Text.literal("/ping"), true);
+        }
+    }
+    
+    private void applyRotationNoise() {
+        long now = System.currentTimeMillis();
+        if (now - lastNoiseTime < 18) return;
+        lastNoiseTime = now;
+        
+        if (random.nextInt(100) < 35) {
+            float noiseYaw = (random.nextFloat() - 0.5f) * ROTATION_NOISE_STRENGTH;
+            float noisePitch = (random.nextFloat() - 0.5f) * ROTATION_NOISE_STRENGTH;
+            mc.player.setYaw(wrap(mc.player.getYaw() + noiseYaw));
+            mc.player.setPitch(clamp(mc.player.getPitch() + noisePitch, -89, 89));
+        }
+    }
+    
+    private void applyRotationDesync() {
+        long now = System.currentTimeMillis();
+        if (now - lastDesyncUpdate < 200) return;
+        lastDesyncUpdate = now;
+        
+        if (random.nextInt(100) < 12) {
+            desyncMode = !desyncMode;
         }
     }
     
@@ -174,10 +273,10 @@ public class SpeedMod implements ModInitializer {
 
     private void updateTarget() {
         if (target != null && target.isAlive() && mc.player.squaredDistanceTo(target) <= RANGE * RANGE) {
-            if (random.nextInt(100) < 95) return;
+            if (random.nextInt(100) < 94) return;
         }
         
-        float searchRange = RANGE + random.nextFloat() * 0.6f;
+        float searchRange = RANGE + random.nextFloat() * 0.7f;
         Entity best = null;
         double closest = searchRange * searchRange;
         Box box = mc.player.getBoundingBox().expand(searchRange);
@@ -188,7 +287,7 @@ public class SpeedMod implements ModInitializer {
             if (e instanceof PlayerEntity && mc.player.isTeammate((PlayerEntity) e)) continue;
             double dist = mc.player.squaredDistanceTo(e);
             if (dist < closest) {
-                if (random.nextFloat() < 0.85f || best == null) {
+                if (random.nextFloat() < 0.83f || best == null) {
                     closest = dist;
                     best = e;
                 }
@@ -206,39 +305,5 @@ public class SpeedMod implements ModInitializer {
     
     private static float clamp(float v, float min, float max) { 
         return Math.max(min, Math.min(max, v)); 
-    }
-
-    static class Turns {
-        private float yaw, pitch;
-        public Turns(float yaw, float pitch) { this.yaw = yaw; this.pitch = pitch; }
-        public float getYaw() { return yaw; }
-        public float getPitch() { return pitch; }
-        public void setYaw(float y) { yaw = y; }
-        public void setPitch(float p) { pitch = p; }
-        public Turns adjustSensitivity() { return this; }
-    }
-
-    static class MathAngle {
-        public static Turns calculateDelta(Turns a, Turns b) {
-            float dy = wrap(b.getYaw() - a.getYaw());
-            float dp = b.getPitch() - a.getPitch();
-            return new Turns(dy, dp);
-        }
-    }
-
-    static class TSAngle {
-        public Turns limitAngleChange(Turns currentAngle, Turns targetAngle, float yawSpeed, float pitchSpeed) {
-            Turns delta = MathAngle.calculateDelta(currentAngle, targetAngle);
-            float yawDelta = delta.getYaw();
-            float pitchDelta = delta.getPitch();
-
-            float yawStep = Math.min(Math.abs(yawDelta), yawSpeed);
-            float pitchStep = Math.min(Math.abs(pitchDelta), pitchSpeed);
-
-            float newYaw = currentAngle.getYaw() + Math.signum(yawDelta) * yawStep;
-            float newPitch = MathHelper.clamp(currentAngle.getPitch() + Math.signum(pitchDelta) * pitchStep, -89.0F, 90.0F);
-
-            return new Turns(newYaw, newPitch).adjustSensitivity();
-        }
     }
 }

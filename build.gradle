@@ -1,4 +1,3 @@
-gradle
 plugins {
     id 'fabric-loom' version '1.7.4'
     id 'maven-publish'

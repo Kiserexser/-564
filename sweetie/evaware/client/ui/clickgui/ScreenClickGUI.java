@@ -88,11 +88,22 @@ public class ScreenClickGUI extends Screen implements QuickImports {
 
     @Override
     public boolean keyPressed(int keyCode, int scanCode, int modifiers) {
+        // ОТКРЫТИЕ ПО ПРАВОМУ SHIFT
+        if (keyCode == GLFW.GLFW_KEY_RIGHT_SHIFT) {
+            if (mc.currentScreen == this) {
+                close();
+            } else {
+                mc.setScreen(this);
+            }
+            return true;
+        }
+
         if (keyCode == GLFW.GLFW_KEY_ESCAPE) {
             open = false;
             mc.mouse.lockCursor();
             return true;
         }
+
         panels.forEach(panel -> panel.keyPressed(keyCode, scanCode, modifiers));
         themeEditor.keyPressed(keyCode, scanCode, modifiers);
         return super.keyPressed(keyCode, scanCode, modifiers);

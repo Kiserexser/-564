@@ -7,6 +7,9 @@
   "authors": [],
   "license": "MIT",
   "environment": "client",
+  "mixins": [
+    "mixins.ewaware.json"
+  ],
   "depends": {
     "fabricloader": ">=0.15.11",
     "minecraft": "1.21.4"

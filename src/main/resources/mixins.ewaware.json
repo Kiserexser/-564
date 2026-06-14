@@ -6,5 +6,9 @@
   "refmap": "mixins.ewaware.refmap.json",
   "mixins": [
     "KeyBindingMixin"
-  ]
+  ],
+  "client": [],
+  "injectors": {
+    "defaultRequire": 1
+  }
 }
